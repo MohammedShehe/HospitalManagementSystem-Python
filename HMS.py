@@ -2,13 +2,14 @@
 Vital Sign Informatics Console - Professional Healthcare System
 Enhanced version with modern UI, improved data visualization, and professional styling
 Including Pharmacist role and enhanced functionality with PDF export
+With patient history tracking and editing capabilities
 """
 
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import sqlite3
 import hashlib
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import json
 import os
 import sys
@@ -132,8 +133,8 @@ def ensure_db():
             c.execute("INSERT INTO patients (full_name,address,dob,created_at) VALUES (?,?,?,?)",
                       (patient[0], patient[1], patient[2], datetime.now().isoformat()))
 
-        # Sample visits
-        today = date.today().isoformat()
+        # Sample visits - create visits for multiple days
+        today = date.today()
         vitals_samples = [
             {"bp": "120/80", "hr": 78, "temp": 98.6, "resp": 16, "spo2": 98},
             {"bp": "130/85", "hr": 72, "temp": 98.4, "resp": 18, "spo2": 99},
@@ -141,15 +142,22 @@ def ensure_db():
             {"bp": "140/90", "hr": 82, "temp": 99.1, "resp": 20, "spo2": 96}
         ]
 
-        for i, vitals in enumerate(vitals_samples, 1):
-            c.execute("""INSERT INTO visits 
-                    (patient_id, assigned_doctor_id, date, time_in, time_out, service, status, vitals_json, doctor_notes, pharmacy_instructions, pharmacy_status)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                      (i, 3 if i % 2 == 0 else 4, today, f"09:{30+i%4}0", f"10:{15+i%4}0",
-                       "General Consultation", "Done" if i % 2 == 0 else "Visit Pharmacy",
-                       json.dumps(vitals), "Patient recovering well." if i % 2 == 0 else "Needs medication review.",
-                       "Take medication as prescribed" if i % 2 == 0 else "Dispense antibiotics and pain relievers",
-                       "Completed" if i % 2 == 0 else "Pending"))
+        # Create visits for the last 5 days
+        for day_offset in range(5):
+            visit_date = (today - timedelta(days=day_offset)).isoformat()
+            for i, vitals in enumerate(vitals_samples, 1):
+                patient_id = i
+                if patient_id > len(sample_patients):
+                    patient_id = len(sample_patients)  # Ensure valid patient ID
+
+                c.execute("""INSERT INTO visits 
+                        (patient_id, assigned_doctor_id, date, time_in, time_out, service, status, vitals_json, doctor_notes, pharmacy_instructions, pharmacy_status)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                          (patient_id, 3 if i % 2 == 0 else 4, visit_date, f"09:{30+i%4}0", f"10:{15+i%4}0",
+                           "General Consultation", "Done" if i % 2 == 0 else "Visit Pharmacy",
+                           json.dumps(vitals), "Patient recovering well." if i % 2 == 0 else "Needs medication review.",
+                           "Take medication as prescribed" if i % 2 == 0 else "Dispense antibiotics and pain relievers",
+                           "Completed" if i % 2 == 0 else "Pending"))
         conn.commit()
 
     conn.close()
@@ -501,6 +509,16 @@ class DB:
         conn.close()
         return pid
 
+    def update_patient(self, patient_id, full_name, address, dob):
+        """Update patient information"""
+        conn = self.connect()
+        c = conn.cursor()
+        c.execute("UPDATE patients SET full_name = ?, address = ?, dob = ? WHERE id = ?",
+                  (full_name, address, dob or "", patient_id))
+        conn.commit()
+        conn.close()
+        return True
+
     def list_patients(self):
         conn = self.connect()
         c = conn.cursor()
@@ -530,6 +548,34 @@ class DB:
             return None
         return {"id": row[0], "full_name": row[1], "address": row[2], "dob": row[3], "created_at": row[4]}
 
+    def get_patient_visit_history(self, patient_id, days=5):
+        """Get patient visit history for specified number of days"""
+        conn = self.connect()
+        c = conn.cursor()
+
+        # Calculate date range
+        end_date = date.today().isoformat()
+        start_date = (date.today() - timedelta(days=days-1)).isoformat()
+
+        c.execute("""SELECT v.id, v.date, v.time_in, v.time_out, v.service, v.status, v.vitals_json, v.doctor_notes, 
+                            v.pharmacy_instructions, v.pharmacy_status, u.id, u.name
+                     FROM visits v LEFT JOIN users u ON v.assigned_doctor_id = u.id
+                     WHERE v.patient_id = ? AND v.date BETWEEN ? AND ?
+                     ORDER BY v.date DESC, v.time_in DESC""", (patient_id, start_date, end_date))
+        rows = c.fetchall()
+        conn.close()
+        visits = []
+        for r in rows:
+            vid, date_s, tin, tout, service, status, vitals_json, notes, pharma_inst, pharma_status, doc_id, doc_name = r
+            vitals = json.loads(vitals_json) if vitals_json else {}
+            visits.append({
+                "id": vid, "date": date_s, "time_in": tin, "time_out": tout, "service": service,
+                "status": status, "vitals": vitals, "notes": notes,
+                "pharmacy_instructions": pharma_inst, "pharmacy_status": pharma_status,
+                "doctor_id": doc_id, "doctor_name": doc_name
+            })
+        return visits
+
     # Visits
     def add_visit(self, patient_id, assigned_doctor_id, visit_date, time_in, time_out, service, status, vitals_dict, doctor_notes, pharmacy_instructions=None):
         conn = self.connect()
@@ -543,6 +589,49 @@ class DB:
         conn.commit()
         conn.close()
         return vid
+
+    def update_visit(self, visit_id, assigned_doctor_id, visit_date, time_in, time_out, service, status, vitals_dict, doctor_notes, pharmacy_instructions=None):
+        """Update existing visit information"""
+        conn = self.connect()
+        c = conn.cursor()
+        c.execute("""UPDATE visits 
+                    SET assigned_doctor_id = ?, date = ?, time_in = ?, time_out = ?, service = ?, 
+                        status = ?, vitals_json = ?, doctor_notes = ?, pharmacy_instructions = ?
+                    WHERE id = ?""",
+                  (assigned_doctor_id, visit_date, time_in, time_out, service, status,
+                   json.dumps(vitals_dict) if vitals_dict else None, doctor_notes,
+                   pharmacy_instructions, visit_id))
+        conn.commit()
+        conn.close()
+        return True
+
+    def get_visit(self, visit_id):
+        """Get specific visit by ID"""
+        conn = self.connect()
+        c = conn.cursor()
+        c.execute("""SELECT v.id, v.patient_id, p.full_name, v.assigned_doctor_id, u.name as doctor_name,
+                            v.date, v.time_in, v.time_out, v.service, v.status, v.vitals_json, 
+                            v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status
+                     FROM visits v 
+                     JOIN patients p ON v.patient_id = p.id 
+                     LEFT JOIN users u ON v.assigned_doctor_id = u.id
+                     WHERE v.id = ?""", (visit_id,))
+        row = c.fetchone()
+        conn.close()
+
+        if not row:
+            return None
+
+        vid, pid, pname, doc_id, doc_name, date_s, tin, tout, service, status, vitals_json, notes, pharma_inst, pharma_status = row
+        vitals = json.loads(vitals_json) if vitals_json else {}
+
+        return {
+            "visit_id": vid, "patient_id": pid, "patient_name": pname,
+            "assigned_doctor_id": doc_id, "doctor_name": doc_name,
+            "date": date_s, "time_in": tin, "time_out": tout, "service": service,
+            "status": status, "vitals": vitals, "notes": notes,
+            "pharmacy_instructions": pharma_inst, "pharmacy_status": pharma_status
+        }
 
     def get_visits_for_patient(self, patient_id):
         conn = self.connect()
@@ -1251,7 +1340,7 @@ class ReceptionistMain(MainBaseFrame):
 
         top = tk.Toplevel(self)
         top.title(f"Patient Details — {p['full_name']} (ID: {p['id']})")
-        top.geometry("900x700")
+        top.geometry("1000x800")
         top.configure(bg=COLORS['background'])
 
         # Header
@@ -1267,9 +1356,15 @@ class ReceptionistMain(MainBaseFrame):
                  font=("Helvetica", 10),
                  background=COLORS['card_bg']).pack(anchor="w", pady=(5, 0))
 
-        # Export PDF button
-        export_frame = tk.Frame(header, bg=COLORS['card_bg'])
-        export_frame.pack(fill="x", pady=(10, 0))
+        # Action buttons
+        action_frame = tk.Frame(header, bg=COLORS['card_bg'])
+        action_frame.pack(fill="x", pady=(10, 0))
+
+        def edit_patient():
+            self.edit_patient_details(p, top)
+
+        def add_new_visit():
+            self.add_visit_for_patient(p, top)
 
         def export_patient_pdf():
             try:
@@ -1278,21 +1373,25 @@ class ReceptionistMain(MainBaseFrame):
             except Exception as e:
                 messagebox.showerror("Export Failed", f"Failed to export PDF: {str(e)}")
 
-        StyledButton(export_frame, text="📄 Export Patient Report (PDF)",
+        StyledButton(action_frame, text="✏️ Edit Patient",
+                    command=edit_patient, style="Secondary.TButton").pack(side="left", padx=(0, 10))
+        StyledButton(action_frame, text="➕ Add New Visit",
+                    command=add_new_visit, style="Secondary.TButton").pack(side="left", padx=(0, 10))
+        StyledButton(action_frame, text="📄 Export Patient Report (PDF)",
                     command=export_patient_pdf).pack(side="right")
 
-        # Visit history with vitals
-        visits_frame = CardFrame(top, title="Visit History with Vital Signs", padding=15)
+        # Visit history with vitals - Show last 5 days
+        visits_frame = CardFrame(top, title=f"Visit History (Last 5 Days)", padding=15)
         visits_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
 
-        visits = self.db.get_visits_for_patient(patient_id)
+        visits = self.db.get_patient_visit_history(patient_id, days=5)
 
         if not visits:
-            ttk.Label(visits_frame, text="No visit history found.",
+            ttk.Label(visits_frame, text="No visit history found for the last 5 days.",
                      background=COLORS['card_bg']).pack(expand=True)
         else:
-            # Create visits table with vitals
-            cols = ("date", "time", "service", "status", "doctor", "bp", "hr", "temp", "resp", "spo2", "pharmacy")
+            # Create visits table with vitals and action buttons
+            cols = ("date", "time", "service", "status", "doctor", "bp", "hr", "temp", "resp", "spo2", "pharmacy", "actions")
             tree = ttk.Treeview(visits_frame, columns=cols, show="headings", height=12)
 
             columns_config = [
@@ -1306,7 +1405,8 @@ class ReceptionistMain(MainBaseFrame):
                 ("temp", "Temp", 70),
                 ("resp", "Resp", 70),
                 ("spo2", "SpO2", 70),
-                ("pharmacy", "Pharmacy", 120)
+                ("pharmacy", "Pharmacy", 120),
+                ("actions", "Actions", 100)
             ]
 
             for col_id, heading, width in columns_config:
@@ -1335,8 +1435,319 @@ class ReceptionistMain(MainBaseFrame):
                     vitals.get('temp', 'N/A'),
                     vitals.get('resp', 'N/A'),
                     vitals.get('spo2', 'N/A'),
-                    pharmacy_status
+                    pharmacy_status,
+                    "Edit"
                 ))
+
+            def on_tree_double_click(event):
+                item = tree.selection()
+                if not item:
+                    return
+                values = tree.item(item[0], "values")
+                visit_date = values[0]
+
+                # Find the visit ID
+                visit_id = None
+                for v in visits:
+                    if v["date"] == visit_date and v["time_in"] == values[1].split(" - ")[0]:
+                        visit_id = v["id"]
+                        break
+
+                if visit_id:
+                    self.edit_visit_details(visit_id, top)
+
+            tree.bind("<Double-1>", on_tree_double_click)
+
+    def edit_patient_details(self, patient, parent_window):
+        """Edit patient information"""
+        top = tk.Toplevel(parent_window)
+        top.title(f"Edit Patient — {patient['full_name']}")
+        top.geometry("500x400")
+        top.configure(bg=COLORS['background'])
+
+        main_frame = CardFrame(top, padding=20)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(main_frame, text=f"Edit Patient: {patient['full_name']}",
+                 font=("Helvetica", 16, "bold"),
+                 background=COLORS['card_bg']).pack(anchor="w", pady=(0, 20))
+
+        # Form fields
+        fields_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        fields_frame.pack(fill="both", expand=True)
+
+        # Full Name
+        ttk.Label(fields_frame, text="Full Name:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=0, column=0, sticky="w", pady=8)
+        name_var = tk.StringVar(value=patient["full_name"])
+        ttk.Entry(fields_frame, textvariable=name_var, width=40).grid(row=0, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Address
+        ttk.Label(fields_frame, text="Address:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=1, column=0, sticky="w", pady=8)
+        address_var = tk.StringVar(value=patient["address"] or "")
+        ttk.Entry(fields_frame, textvariable=address_var, width=40).grid(row=1, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Date of Birth
+        ttk.Label(fields_frame, text="Date of Birth (YYYY-MM-DD):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=2, column=0, sticky="w", pady=8)
+        dob_var = tk.StringVar(value=patient["dob"] or "")
+        ttk.Entry(fields_frame, textvariable=dob_var, width=40).grid(row=2, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        def save_changes():
+            if not name_var.get().strip():
+                messagebox.showwarning("Input Required", "Full name is required.")
+                return
+
+            self.db.update_patient(patient["id"], name_var.get().strip(),
+                                 address_var.get().strip(), dob_var.get().strip())
+            messagebox.showinfo("Success", "Patient information updated successfully.")
+            top.destroy()
+            parent_window.destroy()  # Close the details window to refresh
+            self.show_patient_details(patient["id"])  # Reopen with updated data
+
+        # Buttons
+        button_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        button_frame.pack(fill="x", pady=(20, 0))
+
+        StyledButton(button_frame, text="Save Changes",
+                    command=save_changes).pack(side="right", padx=(10, 0))
+
+        StyledButton(button_frame, text="Cancel",
+                    command=top.destroy,
+                    style="Secondary.TButton").pack(side="right")
+
+    def add_visit_for_patient(self, patient, parent_window):
+        """Add a new visit for existing patient"""
+        top = tk.Toplevel(parent_window)
+        top.title(f"Add Visit — {patient['full_name']}")
+        top.geometry("600x500")
+        top.configure(bg=COLORS['background'])
+
+        main_frame = CardFrame(top, padding=20)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(main_frame, text=f"Add New Visit for: {patient['full_name']}",
+                 font=("Helvetica", 16, "bold"),
+                 background=COLORS['card_bg']).pack(anchor="w", pady=(0, 20))
+
+        # Form fields
+        fields_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        fields_frame.pack(fill="both", expand=True)
+
+        # Date
+        ttk.Label(fields_frame, text="Date (YYYY-MM-DD):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=0, column=0, sticky="w", pady=8)
+        date_var = tk.StringVar(value=date.today().isoformat())
+        ttk.Entry(fields_frame, textvariable=date_var, width=30).grid(row=0, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Time In
+        ttk.Label(fields_frame, text="Time In (HH:MM):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=1, column=0, sticky="w", pady=8)
+        time_in_var = tk.StringVar(value=datetime.now().strftime("%H:%M"))
+        ttk.Entry(fields_frame, textvariable=time_in_var, width=30).grid(row=1, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Assign Doctor
+        ttk.Label(fields_frame, text="Assign Doctor:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=2, column=0, sticky="w", pady=8)
+
+        doctors = self.db.get_doctors()
+        doctor_map = {f"{d['name']} ({d['mobile']})": d['id'] for d in doctors}
+        doctor_var = tk.StringVar()
+        doctor_combo = ttk.Combobox(fields_frame, textvariable=doctor_var,
+                                   values=list(doctor_map.keys()), state="readonly", width=28)
+        doctor_combo.grid(row=2, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Service
+        ttk.Label(fields_frame, text="Service:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=3, column=0, sticky="w", pady=8)
+        service_var = tk.StringVar()
+        service_combo = ttk.Combobox(fields_frame, textvariable=service_var,
+                                    values=["General Consultation", "Follow-up", "Emergency", "Specialist Referral", "Lab Test"],
+                                    state="readonly", width=28)
+        service_combo.grid(row=3, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Status
+        ttk.Label(fields_frame, text="Status:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=4, column=0, sticky="w", pady=8)
+        status_var = tk.StringVar(value="Scheduled")
+        status_combo = ttk.Combobox(fields_frame, textvariable=status_var,
+                                   values=["Scheduled", "In Progress", "Done", "Visit Pharmacy", "Come again"],
+                                   state="readonly", width=28)
+        status_combo.grid(row=4, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        def save_visit():
+            if not doctor_var.get():
+                messagebox.showwarning("Input Required", "Please assign a doctor.")
+                return
+
+            if not service_var.get():
+                messagebox.showwarning("Input Required", "Please select a service.")
+                return
+
+            assigned_doc_id = doctor_map.get(doctor_var.get())
+
+            self.db.add_visit(patient["id"], assigned_doc_id, date_var.get(),
+                            time_in_var.get(), None, service_var.get(),
+                            status_var.get(), {}, None)
+
+            messagebox.showinfo("Success", "New visit added successfully.")
+            top.destroy()
+            parent_window.destroy()  # Close the details window to refresh
+            self.show_patient_details(patient["id"])  # Reopen with updated data
+
+        # Buttons
+        button_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        button_frame.pack(fill="x", pady=(20, 0))
+
+        StyledButton(button_frame, text="Add Visit",
+                    command=save_visit).pack(side="right", padx=(10, 0))
+
+        StyledButton(button_frame, text="Cancel",
+                    command=top.destroy,
+                    style="Secondary.TButton").pack(side="right")
+
+    def edit_visit_details(self, visit_id, parent_window):
+        """Edit existing visit details"""
+        visit = self.db.get_visit(visit_id)
+        if not visit:
+            messagebox.showerror("Not Found", "Visit not found.")
+            return
+
+        top = tk.Toplevel(parent_window)
+        top.title(f"Edit Visit — {visit['patient_name']}")
+        top.geometry("700x600")
+        top.configure(bg=COLORS['background'])
+
+        main_frame = CardFrame(top, padding=20)
+        main_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ttk.Label(main_frame, text=f"Edit Visit for: {visit['patient_name']}",
+                 font=("Helvetica", 16, "bold"),
+                 background=COLORS['card_bg']).pack(anchor="w", pady=(0, 20))
+
+        # Form fields
+        fields_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        fields_frame.pack(fill="both", expand=True)
+
+        # Date
+        ttk.Label(fields_frame, text="Date (YYYY-MM-DD):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=0, column=0, sticky="w", pady=8)
+        date_var = tk.StringVar(value=visit["date"])
+        ttk.Entry(fields_frame, textvariable=date_var, width=30).grid(row=0, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Time In
+        ttk.Label(fields_frame, text="Time In (HH:MM):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=1, column=0, sticky="w", pady=8)
+        time_in_var = tk.StringVar(value=visit["time_in"] or "")
+        ttk.Entry(fields_frame, textvariable=time_in_var, width=30).grid(row=1, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Time Out
+        ttk.Label(fields_frame, text="Time Out (HH:MM):",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=2, column=0, sticky="w", pady=8)
+        time_out_var = tk.StringVar(value=visit["time_out"] or "")
+        ttk.Entry(fields_frame, textvariable=time_out_var, width=30).grid(row=2, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Assign Doctor
+        ttk.Label(fields_frame, text="Assign Doctor:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=3, column=0, sticky="w", pady=8)
+
+        doctors = self.db.get_doctors()
+        doctor_map = {f"{d['name']} ({d['mobile']})": d['id'] for d in doctors}
+        doctor_var = tk.StringVar()
+
+        # Set current doctor if exists
+        current_doctor = None
+        for doc_text, doc_id in doctor_map.items():
+            if doc_id == visit.get("assigned_doctor_id"):
+                current_doctor = doc_text
+                break
+
+        doctor_combo = ttk.Combobox(fields_frame, textvariable=doctor_var,
+                                   values=list(doctor_map.keys()), state="readonly", width=28)
+        doctor_combo.grid(row=3, column=1, sticky="w", pady=8, padx=(10, 0))
+        if current_doctor:
+            doctor_var.set(current_doctor)
+
+        # Service
+        ttk.Label(fields_frame, text="Service:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=4, column=0, sticky="w", pady=8)
+        service_var = tk.StringVar(value=visit["service"] or "")
+        service_entry = ttk.Entry(fields_frame, textvariable=service_var, width=30)
+        service_entry.grid(row=4, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Status
+        ttk.Label(fields_frame, text="Status:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=5, column=0, sticky="w", pady=8)
+        status_var = tk.StringVar(value=visit["status"] or "Scheduled")
+        status_combo = ttk.Combobox(fields_frame, textvariable=status_var,
+                                   values=["Scheduled", "In Progress", "Done", "Visit Pharmacy", "Come again"],
+                                   state="readonly", width=28)
+        status_combo.grid(row=5, column=1, sticky="w", pady=8, padx=(10, 0))
+
+        # Doctor Notes
+        ttk.Label(fields_frame, text="Doctor Notes:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=6, column=0, sticky="w", pady=8)
+        notes_text = tk.Text(fields_frame, width=40, height=4, font=("Helvetica", 9))
+        notes_text.grid(row=6, column=1, sticky="w", pady=8, padx=(10, 0))
+        notes_text.insert("1.0", visit.get("notes", ""))
+
+        # Pharmacy Instructions
+        ttk.Label(fields_frame, text="Pharmacy Instructions:",
+                 background=COLORS['card_bg'],
+                 font=('Helvetica', 9, 'bold')).grid(row=7, column=0, sticky="w", pady=8)
+        pharmacy_text = tk.Text(fields_frame, width=40, height=3, font=("Helvetica", 9))
+        pharmacy_text.grid(row=7, column=1, sticky="w", pady=8, padx=(10, 0))
+        pharmacy_text.insert("1.0", visit.get("pharmacy_instructions", ""))
+
+        def save_changes():
+            if not doctor_var.get():
+                messagebox.showwarning("Input Required", "Please assign a doctor.")
+                return
+
+            if not service_var.get().strip():
+                messagebox.showwarning("Input Required", "Service is required.")
+                return
+
+            assigned_doc_id = doctor_map.get(doctor_var.get())
+            notes = notes_text.get("1.0", "end-1c").strip()
+            pharmacy_instructions = pharmacy_text.get("1.0", "end-1c").strip()
+
+            self.db.update_visit(visit_id, assigned_doc_id, date_var.get(),
+                               time_in_var.get(), time_out_var.get(),
+                               service_var.get(), status_var.get(),
+                               visit.get("vitals", {}), notes, pharmacy_instructions)
+
+            messagebox.showinfo("Success", "Visit updated successfully.")
+            top.destroy()
+            parent_window.destroy()  # Close the details window to refresh
+            self.show_patient_details(visit["patient_id"])  # Reopen with updated data
+
+        # Buttons
+        button_frame = tk.Frame(main_frame, bg=COLORS['card_bg'])
+        button_frame.pack(fill="x", pady=(20, 0))
+
+        StyledButton(button_frame, text="Save Changes",
+                    command=save_changes).pack(side="right", padx=(10, 0))
+
+        StyledButton(button_frame, text="Cancel",
+                    command=top.destroy,
+                    style="Secondary.TButton").pack(side="right")
 
     def show_add_patient(self):
         self.clear_right()
