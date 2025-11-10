@@ -3,6 +3,7 @@ Vital Sign Informatics Console - Professional Healthcare System
 Enhanced version with modern UI, improved data visualization, and professional styling
 Including Pharmacist role and enhanced functionality with PDF export
 With patient history tracking and editing capabilities
+With QR code generation for patient visit history - MODIFIED FOR READABLE FORMAT
 """
 
 import tkinter as tk
@@ -28,6 +29,11 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 import tempfile
 
+# QR Code generation - NEW ADDITION
+import qrcode
+from PIL import Image, ImageTk
+import io
+
 # Professional color scheme
 COLORS = {
     'primary': '#2C3E50',      # Dark blue - professional medical
@@ -43,6 +49,102 @@ COLORS = {
 }
 
 DB_FILE = "vital_signs.db"
+
+# ---------------------
+# QR Code Generator - MODIFIED VERSION
+# ---------------------
+class QRCodeGenerator:
+    def __init__(self, db):
+        self.db = db
+
+    def generate_patient_qr_data(self, patient_id):
+        """Generate QR code data for a patient with last 4 visits in a readable format"""
+        patient = self.db.get_patient(patient_id)
+        if not patient:
+            return None
+
+        # Get last 4 visits
+        visits = self.db.get_visits_for_patient(patient_id)
+        last_4_visits = visits[:4] if len(visits) > 4 else visits
+
+        # Create readable text format instead of JSON
+        qr_text = f"ST. MERCY GENERAL HOSPITAL\n"
+        qr_text += f"PATIENT INFORMATION\n"
+        qr_text += f"{'='*40}\n"
+        qr_text += f"Patient ID: {patient_id}\n"
+        qr_text += f"Name: {patient['full_name']}\n"
+        qr_text += f"Date of Birth: {patient['dob'] or 'Not provided'}\n"
+        qr_text += f"Address: {patient['address'] or 'Not provided'}\n"
+        qr_text += f"Registered: {patient['created_at'][:10]}\n"
+        qr_text += f"\n"
+        qr_text += f"RECENT VISIT HISTORY (Last {len(last_4_visits)} visits)\n"
+        qr_text += f"{'='*40}\n"
+
+        for i, visit in enumerate(last_4_visits, 1):
+            qr_text += f"\nVisit {i} - {visit['date']}\n"
+            qr_text += f"  Service: {visit['service'] or 'Not specified'}\n"
+            qr_text += f"  Doctor: {visit['doctor_name'] or 'Unassigned'}\n"
+            qr_text += f"  Status: {visit['status'] or 'Unknown'}\n"
+            qr_text += f"  Time: {visit['time_in'] or 'N/A'} - {visit['time_out'] or 'N/A'}\n"
+
+            # Add vital signs if available
+            vitals = visit.get('vitals', {})
+            if vitals:
+                qr_text += f"  Vital Signs:\n"
+                if vitals.get('bp'):
+                    qr_text += f"    BP: {vitals['bp']}\n"
+                if vitals.get('hr'):
+                    qr_text += f"    Heart Rate: {vitals['hr']} bpm\n"
+                if vitals.get('temp'):
+                    qr_text += f"    Temp: {vitals['temp']}°F\n"
+                if vitals.get('resp'):
+                    qr_text += f"    Resp: {vitals['resp']} breaths/min\n"
+                if vitals.get('spo2'):
+                    qr_text += f"    SpO2: {vitals['spo2']}%\n"
+
+            qr_text += f"  Pharmacy: {visit.get('pharmacy_status', 'N/A')}\n"
+
+        qr_text += f"\n"
+        qr_text += f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+        qr_text += f"{'='*40}\n"
+        qr_text += f"St. Mercy General Hospital\n"
+        qr_text += f"Confidential Patient Information"
+
+        return qr_text
+
+    def generate_qr_code_image(self, patient_id, size=200):
+        """Generate QR code as PIL Image"""
+        qr_data = self.generate_patient_qr_data(patient_id)
+        if not qr_data:
+            return None
+
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(qr_data)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white")
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
+        return img
+
+    def generate_qr_code_tk_image(self, patient_id, size=200):
+        """Generate QR code as Tkinter PhotoImage"""
+        pil_image = self.generate_qr_code_image(patient_id, size)
+        if pil_image:
+            return ImageTk.PhotoImage(pil_image)
+        return None
+
+    def save_qr_code_image(self, patient_id, filepath, size=300):
+        """Save QR code to file"""
+        pil_image = self.generate_qr_code_image(patient_id, size)
+        if pil_image:
+            pil_image.save(filepath, "PNG")
+            return True
+        return False
 
 # ---------------------
 # Utilities
@@ -92,9 +194,7 @@ def ensure_db():
             vitals_json TEXT,
             doctor_notes TEXT,
             pharmacy_instructions TEXT,
-            pharmacy_status TEXT DEFAULT 'Pending',
-            FOREIGN KEY(patient_id) REFERENCES patients(id),
-            FOREIGN KEY(assigned_doctor_id) REFERENCES users(id)
+            pharmacy_status TEXT DEFAULT 'Pending'
         )
     """)
 
@@ -531,9 +631,9 @@ class DB:
         conn = self.connect()
         c = conn.cursor()
         c.execute("""SELECT id, full_name, address, dob, created_at FROM patients 
-                     WHERE full_name LIKE ? OR address LIKE ? OR dob LIKE ?
+                     WHERE full_name LIKE ? OR address LIKE ? OR dob LIKE ? OR id = ?
                      ORDER BY id DESC""",
-                  (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+                  (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
         rows = c.fetchall()
         conn.close()
         return [{"id": r[0], "full_name": r[1], "address": r[2], "dob": r[3], "created_at": r[4]} for r in rows]
@@ -736,19 +836,19 @@ class DB:
                        FROM visits v 
                        JOIN patients p ON v.patient_id = p.id 
                        JOIN users u ON v.assigned_doctor_id = u.id
-                       WHERE (p.full_name LIKE ? OR v.service LIKE ? OR v.pharmacy_instructions LIKE ?)
+                       WHERE (p.full_name LIKE ? OR v.service LIKE ? OR v.pharmacy_instructions LIKE ? OR v.id = ?)
                          AND (v.pharmacy_status = 'Pending' OR v.status = 'Visit Pharmacy')
                        ORDER BY v.date DESC, v.time_in DESC"""
-            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
         else:
             query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
                               v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
                        FROM visits v 
                        JOIN patients p ON v.patient_id = p.id 
                        JOIN users u ON v.assigned_doctor_id = u.id
-                       WHERE p.full_name LIKE ? OR v.service LIKE ? OR v.doctor_notes LIKE ? OR v.pharmacy_instructions LIKE ?
+                       WHERE p.full_name LIKE ? OR v.service LIKE ? OR v.doctor_notes LIKE ? OR v.pharmacy_instructions LIKE ? OR v.id = ?
                        ORDER BY v.date DESC, v.time_in DESC"""
-            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
 
         rows = c.fetchall()
         conn.close()
@@ -829,6 +929,7 @@ class VitalSignApp(tk.Tk):
         self.current_user = None
         self._frame = None
         self.pdf_exporter = PDFExporter(db)
+        self.qr_generator = QRCodeGenerator(db)  # NEW ADDITION
 
         # Configure styles
         self.configure_styles()
@@ -1019,6 +1120,7 @@ class MainBaseFrame(tk.Frame):
         self.master = master
         self.user = user
         self.db = master.db
+        self.qr_generator = master.qr_generator  # NEW ADDITION
         self.build_layout()
 
     def build_layout(self):
@@ -1143,7 +1245,8 @@ class ReceptionistMain(MainBaseFrame):
             ("➕ Add Patient", self.show_add_patient),
             ("📅 Today's Visits", self.show_todays_visits),
             ("💊 Pharmacy Queue", self.show_pharmacy_queue),
-            ("📄 Export Reports", self.show_export_reports)
+            ("📄 Export Reports", self.show_export_reports),
+            ("🔲 QR Codes", self.show_qr_codes)  # NEW ADDITION
         ]
 
         for i, (text, command) in enumerate(self.nav_buttons):
@@ -1254,7 +1357,7 @@ class ReceptionistMain(MainBaseFrame):
         ttk.Label(header_frame, text="View and manage all registered patients",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality
+        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
         def perform_search(search_term):
             if not search_term.strip():
                 patients = self.db.list_patients()
@@ -1278,7 +1381,7 @@ class ReceptionistMain(MainBaseFrame):
             # Update status
             status_label.config(text=f"Total patients: {len(patients)}")
 
-        search_var = self.create_search_bar(self.right_content, perform_search, "Search by name, address, or DOB...")
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search by ID, name, address, or DOB...")
 
         # Patients table
         table_frame = CardFrame(self.right_content, padding=0)
@@ -1340,12 +1443,20 @@ class ReceptionistMain(MainBaseFrame):
 
         top = tk.Toplevel(self)
         top.title(f"Patient Details — {p['full_name']} (ID: {p['id']})")
-        top.geometry("1000x800")
+        top.geometry("1100x700")  # Adjusted size
         top.configure(bg=COLORS['background'])
 
-        # Header
-        header = CardFrame(top, padding=20)
-        header.pack(fill="x", padx=20, pady=20)
+        # Main container with tabs - NEW ADDITION
+        notebook = ttk.Notebook(top)
+        notebook.pack(fill="both", expand=True, padx=20, pady=20)
+
+        # Tab 1: Patient Information
+        info_tab = ttk.Frame(notebook, style="Card.TFrame")
+        notebook.add(info_tab, text="Patient Information")
+
+        # Header in info tab
+        header = CardFrame(info_tab, padding=20)
+        header.pack(fill="x", pady=(0, 20))
 
         ttk.Label(header, text=p["full_name"],
                  font=("Helvetica", 18, "bold"),
@@ -1381,8 +1492,8 @@ class ReceptionistMain(MainBaseFrame):
                     command=export_patient_pdf).pack(side="right")
 
         # Visit history with vitals - Show last 5 days
-        visits_frame = CardFrame(top, title=f"Visit History (Last 5 Days)", padding=15)
-        visits_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
+        visits_frame = CardFrame(info_tab, title=f"Visit History (Last 5 Days)", padding=15)
+        visits_frame.pack(fill="both", expand=True, pady=(0, 20))
 
         visits = self.db.get_patient_visit_history(patient_id, days=5)
 
@@ -1457,6 +1568,173 @@ class ReceptionistMain(MainBaseFrame):
                     self.edit_visit_details(visit_id, top)
 
             tree.bind("<Double-1>", on_tree_double_click)
+
+        # Tab 2: QR Code - MODIFIED VERSION
+        qr_tab = ttk.Frame(notebook, style="Card.TFrame")
+        notebook.add(qr_tab, text="Patient QR Code")
+
+        # QR Code content - SIMPLIFIED
+        qr_frame = CardFrame(qr_tab, padding=30)
+        qr_frame.pack(fill="both", expand=True)
+
+        ttk.Label(qr_frame, text="Patient QR Code",
+                 font=("Helvetica", 16, "bold"),
+                 background=COLORS['card_bg']).pack(pady=(0, 20))
+
+        ttk.Label(qr_frame, text="Scan this QR code to view the patient's last 4 hospital visits",
+                 background=COLORS['card_bg']).pack(pady=(0, 30))
+
+        # Generate and display QR code
+        qr_image = self.qr_generator.generate_qr_code_tk_image(patient_id, size=300)
+        if qr_image:
+            qr_label = ttk.Label(qr_frame, image=qr_image, background=COLORS['card_bg'])
+            qr_label.image = qr_image  # Keep a reference to prevent garbage collection
+            qr_label.pack(pady=20)
+
+        # SINGLE ACTION BUTTON - Download Report
+        action_frame = tk.Frame(qr_frame, bg=COLORS['card_bg'])
+        action_frame.pack(fill="x", pady=(30, 0))
+
+
+        # Only one button now - Download Report
+        StyledButton(action_frame, text="📥 PRINT QR CODE CARD"),
+
+    def show_qr_codes(self):
+        """NEW FEATURE: View and manage all patient QR codes"""
+        self.clear_right()
+
+        header_frame = tk.Frame(self.right_content, bg=COLORS['background'])
+        header_frame.pack(fill="x", pady=(0, 20))
+
+        ttk.Label(header_frame, text="Patient QR Codes", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(header_frame, text="Generate and manage QR codes for all patients",
+                 style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
+
+        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        def perform_search(search_term):
+            if not search_term.strip():
+                patients = self.db.list_patients()
+            else:
+                patients = self.db.search_patients(search_term)
+
+            # Clear existing content
+            for widget in patients_frame.winfo_children():
+                widget.destroy()
+
+            # Display patients in a grid with their QR codes
+            if not patients:
+                ttk.Label(patients_frame, text="No patients found.",
+                         background=COLORS['background']).pack(expand=True)
+                return
+
+            # Create a scrollable frame for patients
+            canvas = tk.Canvas(patients_frame, bg=COLORS['background'], highlightthickness=0)
+            scrollbar = ttk.Scrollbar(patients_frame, orient="vertical", command=canvas.yview)
+            scrollable_frame = ttk.Frame(canvas, style="Card.TFrame")
+
+            scrollable_frame.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+            )
+
+            canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+            canvas.configure(yscrollcommand=scrollbar.set)
+
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+
+            # Display patients in a grid (2 columns)
+            row, col = 0, 0
+            for patient in patients:
+                patient_card = CardFrame(scrollable_frame, padding=15)
+                patient_card.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
+
+                # Patient info
+                ttk.Label(patient_card, text=patient["full_name"],
+                         font=("Helvetica", 12, "bold"),
+                         background=COLORS['card_bg']).pack(anchor="w")
+
+                ttk.Label(patient_card, text=f"ID: {patient['id']} | DOB: {patient['dob'] or 'N/A'}",
+                         background=COLORS['card_bg']).pack(anchor="w", pady=(2, 10))
+
+                # Generate and display QR code
+                qr_image = self.qr_generator.generate_qr_code_tk_image(patient["id"], size=150)
+                if qr_image:
+                    qr_label = ttk.Label(patient_card, image=qr_image, background=COLORS['card_bg'])
+                    qr_label.image = qr_image
+                    qr_label.pack(pady=5)
+
+                # SINGLE ACTION BUTTON - Download Report
+                btn_frame = tk.Frame(patient_card, bg=COLORS['card_bg'])
+                btn_frame.pack(fill="x", pady=(10, 0))
+
+                def make_download_cmd(pid, pname):
+                    return lambda: self.download_qr_report(pid, pname)
+
+                StyledButton(btn_frame, text="📥 Download Report",
+                            command=make_download_cmd(patient["id"], patient["full_name"]),
+                            style="Secondary.TButton").pack(fill="x")
+
+                # Update grid position
+                col += 1
+                if col >= 2:  # 2 columns
+                    col = 0
+                    row += 1
+
+            # Configure grid weights for responsive layout
+            scrollable_frame.columnconfigure(0, weight=1)
+            scrollable_frame.columnconfigure(1, weight=1)
+
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search patients by ID or name...")
+
+        # Patients container
+        patients_frame = tk.Frame(self.right_content, bg=COLORS['background'])
+        patients_frame.pack(fill="both", expand=True)
+
+        # Bulk actions
+        bulk_frame = CardFrame(self.right_content, title="Bulk QR Code Operations", padding=15)
+        bulk_frame.pack(fill="x", pady=(20, 0))
+
+        def generate_all_qr_codes():
+            patients = self.db.list_patients()
+            if not patients:
+                messagebox.showinfo("No Patients", "No patients found to generate QR codes for.")
+                return
+
+            from tkinter import filedialog
+            folder = filedialog.askdirectory(title="Select folder to save all QR codes")
+            if folder:
+                success_count = 0
+                for patient in patients:
+                    filename = os.path.join(folder, f"patient_{patient['id']}_{patient['full_name'].replace(' ', '_')}.png")
+                    if self.qr_generator.save_qr_code_image(patient["id"], filename):
+                        success_count += 1
+
+                messagebox.showinfo("Bulk Export Complete",
+                                  f"Successfully generated {success_count} out of {len(patients)} QR codes in:\n{folder}")
+
+        StyledButton(bulk_frame, text="📁 Generate All QR Codes",
+                    command=generate_all_qr_codes).pack(side="left")
+
+        # Load initial patients
+        perform_search("")
+
+        # Status bar
+        self.create_status_bar(self.right_content, "QR code management - Scan any code to view patient's last 4 visits")
+
+    def download_qr_report(self, patient_id, patient_name):
+        """Download individual QR code - SIMPLIFIED VERSION"""
+        from tkinter import filedialog
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
+            initialfile=f"patient_qr_{patient_name.replace(' ', '_')}_{patient_id}.png"
+        )
+        if filename:
+            if self.qr_generator.save_qr_code_image(patient_id, filename):
+                messagebox.showinfo("Success", f"QR code for {patient_name} saved to:\n{filename}")
+            else:
+                messagebox.showerror("Error", f"Failed to save QR code for {patient_name}")
 
     def edit_patient_details(self, patient, parent_window):
         """Edit patient information"""
@@ -1902,7 +2180,7 @@ class ReceptionistMain(MainBaseFrame):
         ttk.Label(header_frame, text="Patients waiting for pharmacy services",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality
+        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
         def perform_search(search_term):
             if not search_term.strip():
                 visits = self.db.get_visits_for_pharmacy()
@@ -1927,7 +2205,7 @@ class ReceptionistMain(MainBaseFrame):
             # Update status
             status_label.config(text=f"Total pharmacy visits: {len(visits)}")
 
-        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient name, service, or instructions...")
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient ID, name, service, or instructions...")
 
         # Pharmacy visits table
         table_frame = CardFrame(self.right_content, padding=0)
@@ -2300,13 +2578,14 @@ class DoctorMain(MainBaseFrame):
         ttk.Label(header_frame, text="Patients assigned to you for care",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality
+        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
         def perform_search(search_term):
             visits = self.db.get_visits_for_doctor(self.user["id"])
             if search_term.strip():
                 visits = [v for v in visits if search_term.lower() in v["patient_name"].lower() or
                          search_term.lower() in v["service"].lower() or
-                         search_term.lower() in (v.get("notes") or "").lower()]
+                         search_term.lower() in (v.get("notes") or "").lower() or
+                         str(v["visit_id"]) == search_term]
 
             # Clear existing items
             for item in tree.get_children():
@@ -2326,7 +2605,7 @@ class DoctorMain(MainBaseFrame):
             # Update status
             status_label.config(text=f"Total assigned visits: {len(visits)}")
 
-        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient name, service, or notes...")
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient ID, name, service, or notes...")
 
         visits = self.db.get_visits_for_doctor(self.user["id"])
 
@@ -2761,7 +3040,7 @@ class PharmacistMain(MainBaseFrame):
         ttk.Label(header_frame, text="Manage patient medication orders",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality
+        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
         def perform_search(search_term):
             if not search_term.strip():
                 visits = self.db.get_visits_for_pharmacy()
@@ -2787,7 +3066,7 @@ class PharmacistMain(MainBaseFrame):
             # Update status
             status_label.config(text=f"Total pharmacy orders: {len(visits)}")
 
-        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient name, service, or instructions...")
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search by patient ID, name, service, or instructions...")
 
         # Pharmacy visits table
         table_frame = CardFrame(self.right_content, padding=0)
@@ -2809,7 +3088,7 @@ class PharmacistMain(MainBaseFrame):
             ("date", "Date", 100),
             ("service", "Service", 120),
             ("doctor", "Doctor", 120),
-            ("status", "Status", 100),
+            ("status", "Pharmacy Status", 100),
             ("instructions", "Instructions", 150)
         ]
 
@@ -2862,12 +3141,13 @@ class PharmacistMain(MainBaseFrame):
                      style="Subtitle.TLabel").pack(expand=True)
             return
 
-        # Search functionality for completed orders
+        # Search functionality for completed orders - MODIFIED TO SEARCH BY ID AND NAME
         def perform_search(search_term):
             filtered_visits = [v for v in completed_visits if
                              search_term.lower() in v["patient_name"].lower() or
                              search_term.lower() in v["service"].lower() or
-                             search_term.lower() in v.get("pharmacy_instructions", "").lower()]
+                             search_term.lower() in v.get("pharmacy_instructions", "").lower() or
+                             str(v["visit_id"]) == search_term]
 
             # Clear existing items
             for item in tree.get_children():
@@ -2887,7 +3167,7 @@ class PharmacistMain(MainBaseFrame):
             # Update status
             status_label.config(text=f"Completed orders: {len(filtered_visits)}")
 
-        search_var = self.create_search_bar(self.right_content, perform_search, "Search completed orders...")
+        search_var = self.create_search_bar(self.right_content, perform_search, "Search completed orders by ID or name...")
 
         # Completed orders table
         table_frame = CardFrame(self.right_content, padding=0)
