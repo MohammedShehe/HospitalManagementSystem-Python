@@ -630,10 +630,21 @@ class DB:
     def search_patients(self, search_term):
         conn = self.connect()
         c = conn.cursor()
-        c.execute("""SELECT id, full_name, address, dob, created_at FROM patients 
-                     WHERE full_name LIKE ? OR address LIKE ? OR dob LIKE ? OR id = ?
-                     ORDER BY id DESC""",
-                  (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
+
+        # Try to convert search term to integer for ID search
+        try:
+            search_id = int(search_term)
+            c.execute("""SELECT id, full_name, address, dob, created_at FROM patients 
+                         WHERE id = ? OR full_name LIKE ? OR address LIKE ? OR dob LIKE ?
+                         ORDER BY id DESC""",
+                      (search_id, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+        except ValueError:
+            # If not a number, search only by text fields
+            c.execute("""SELECT id, full_name, address, dob, created_at FROM patients 
+                         WHERE full_name LIKE ? OR address LIKE ? OR dob LIKE ?
+                         ORDER BY id DESC""",
+                      (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+
         rows = c.fetchall()
         conn.close()
         return [{"id": r[0], "full_name": r[1], "address": r[2], "dob": r[3], "created_at": r[4]} for r in rows]
@@ -783,7 +794,7 @@ class DB:
                             v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
                      FROM visits v 
                      JOIN patients p ON v.patient_id = p.id 
-                     JOIN users u ON v.assigned_doctor_id = u.id
+                     LEFT JOIN users u ON v.assigned_doctor_id = u.id
                      WHERE v.pharmacy_status = 'Pending' OR v.status = 'Visit Pharmacy'
                      ORDER BY v.date DESC, v.time_in DESC""")
         rows = c.fetchall()
@@ -830,25 +841,49 @@ class DB:
         conn = self.connect()
         c = conn.cursor()
 
-        if role == "pharmacy":
-            query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
-                              v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
-                       FROM visits v 
-                       JOIN patients p ON v.patient_id = p.id 
-                       JOIN users u ON v.assigned_doctor_id = u.id
-                       WHERE (p.full_name LIKE ? OR v.service LIKE ? OR v.pharmacy_instructions LIKE ? OR v.id = ?)
-                         AND (v.pharmacy_status = 'Pending' OR v.status = 'Visit Pharmacy')
-                       ORDER BY v.date DESC, v.time_in DESC"""
-            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
-        else:
-            query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
-                              v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
-                       FROM visits v 
-                       JOIN patients p ON v.patient_id = p.id 
-                       JOIN users u ON v.assigned_doctor_id = u.id
-                       WHERE p.full_name LIKE ? OR v.service LIKE ? OR v.doctor_notes LIKE ? OR v.pharmacy_instructions LIKE ? OR v.id = ?
-                       ORDER BY v.date DESC, v.time_in DESC"""
-            c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", search_term))
+        # Try to convert search term to integer for ID search
+        try:
+            search_id = int(search_term)
+            if role == "pharmacy":
+                query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
+                                  v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
+                           FROM visits v 
+                           JOIN patients p ON v.patient_id = p.id 
+                           JOIN users u ON v.assigned_doctor_id = u.id
+                           WHERE (v.id = ? OR p.full_name LIKE ? OR v.service LIKE ? OR v.pharmacy_instructions LIKE ?)
+                             AND (v.pharmacy_status = 'Pending' OR v.status = 'Visit Pharmacy')
+                           ORDER BY v.date DESC, v.time_in DESC"""
+                c.execute(query, (search_id, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+            else:
+                query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
+                                  v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
+                           FROM visits v 
+                           JOIN patients p ON v.patient_id = p.id 
+                           JOIN users u ON v.assigned_doctor_id = u.id
+                           WHERE v.id = ? OR p.full_name LIKE ? OR v.service LIKE ? OR v.doctor_notes LIKE ? OR v.pharmacy_instructions LIKE ?
+                           ORDER BY v.date DESC, v.time_in DESC"""
+                c.execute(query, (search_id, f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+        except ValueError:
+            # If not a number, search only by text fields
+            if role == "pharmacy":
+                query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
+                                  v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
+                           FROM visits v 
+                           JOIN patients p ON v.patient_id = p.id 
+                           JOIN users u ON v.assigned_doctor_id = u.id
+                           WHERE (p.full_name LIKE ? OR v.service LIKE ? OR v.pharmacy_instructions LIKE ?)
+                             AND (v.pharmacy_status = 'Pending' OR v.status = 'Visit Pharmacy')
+                           ORDER BY v.date DESC, v.time_in DESC"""
+                c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
+            else:
+                query = """SELECT v.id, v.patient_id, p.full_name, v.date, v.time_in, v.time_out, v.service, v.status, 
+                                  v.vitals_json, v.doctor_notes, v.pharmacy_instructions, v.pharmacy_status, u.name as doctor_name
+                           FROM visits v 
+                           JOIN patients p ON v.patient_id = p.id 
+                           JOIN users u ON v.assigned_doctor_id = u.id
+                           WHERE p.full_name LIKE ? OR v.service LIKE ? OR v.doctor_notes LIKE ? OR v.pharmacy_instructions LIKE ?
+                           ORDER BY v.date DESC, v.time_in DESC"""
+                c.execute(query, (f"%{search_term}%", f"%{search_term}%", f"%{search_term}%", f"%{search_term}%"))
 
         rows = c.fetchall()
         conn.close()
@@ -1357,7 +1392,7 @@ class ReceptionistMain(MainBaseFrame):
         ttk.Label(header_frame, text="View and manage all registered patients",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality - FIXED SEARCH
         def perform_search(search_term):
             if not search_term.strip():
                 patients = self.db.list_patients()
@@ -1591,13 +1626,18 @@ class ReceptionistMain(MainBaseFrame):
             qr_label.image = qr_image  # Keep a reference to prevent garbage collection
             qr_label.pack(pady=20)
 
-        # SINGLE ACTION BUTTON - Download Report
+        # SINGLE ACTION BUTTON - Print QR (Non-functional)
         action_frame = tk.Frame(qr_frame, bg=COLORS['card_bg'])
         action_frame.pack(fill="x", pady=(30, 0))
 
+        def print_qr_nothing():
+            # This button does nothing as requested
+            pass
 
-        # Only one button now - Download Report
-        StyledButton(action_frame, text="📥 PRINT QR CODE CARD"),
+        # Only one button now - Print QR (non-functional)
+        print_btn = StyledButton(action_frame, text="🖨️ Print QR",
+                    command=print_qr_nothing)
+        print_btn.pack()
 
     def show_qr_codes(self):
         """NEW FEATURE: View and manage all patient QR codes"""
@@ -1610,7 +1650,7 @@ class ReceptionistMain(MainBaseFrame):
         ttk.Label(header_frame, text="Generate and manage QR codes for all patients",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality - FIXED SEARCH
         def perform_search(search_term):
             if not search_term.strip():
                 patients = self.db.list_patients()
@@ -1664,15 +1704,16 @@ class ReceptionistMain(MainBaseFrame):
                     qr_label.image = qr_image
                     qr_label.pack(pady=5)
 
-                # SINGLE ACTION BUTTON - Download Report
+                # SINGLE ACTION BUTTON - Print QR (Non-functional)
                 btn_frame = tk.Frame(patient_card, bg=COLORS['card_bg'])
                 btn_frame.pack(fill="x", pady=(10, 0))
 
-                def make_download_cmd(pid, pname):
-                    return lambda: self.download_qr_report(pid, pname)
+                def print_qr_nothing():
+                    # This button does nothing as requested
+                    pass
 
-                StyledButton(btn_frame, text="📥 Download Report",
-                            command=make_download_cmd(patient["id"], patient["full_name"]),
+                StyledButton(btn_frame, text="🖨️ Print QR",
+                            command=print_qr_nothing,
                             style="Secondary.TButton").pack(fill="x")
 
                 # Update grid position
@@ -1721,20 +1762,6 @@ class ReceptionistMain(MainBaseFrame):
 
         # Status bar
         self.create_status_bar(self.right_content, "QR code management - Scan any code to view patient's last 4 visits")
-
-    def download_qr_report(self, patient_id, patient_name):
-        """Download individual QR code - SIMPLIFIED VERSION"""
-        from tkinter import filedialog
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".png",
-            filetypes=[("PNG files", "*.png"), ("All files", "*.*")],
-            initialfile=f"patient_qr_{patient_name.replace(' ', '_')}_{patient_id}.png"
-        )
-        if filename:
-            if self.qr_generator.save_qr_code_image(patient_id, filename):
-                messagebox.showinfo("Success", f"QR code for {patient_name} saved to:\n{filename}")
-            else:
-                messagebox.showerror("Error", f"Failed to save QR code for {patient_name}")
 
     def edit_patient_details(self, patient, parent_window):
         """Edit patient information"""
@@ -2171,6 +2198,7 @@ class ReceptionistMain(MainBaseFrame):
         self.create_status_bar(self.right_content, f"Today's visits: {len(visits_data)} | {status_text}")
 
     def show_pharmacy_queue(self):
+        """FIXED PHARMACY QUEUE - Now properly accessible"""
         self.clear_right()
 
         header_frame = tk.Frame(self.right_content, bg=COLORS['background'])
@@ -2180,7 +2208,7 @@ class ReceptionistMain(MainBaseFrame):
         ttk.Label(header_frame, text="Patients waiting for pharmacy services",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality - FIXED SEARCH
         def perform_search(search_term):
             if not search_term.strip():
                 visits = self.db.get_visits_for_pharmacy()
@@ -2578,7 +2606,7 @@ class DoctorMain(MainBaseFrame):
         ttk.Label(header_frame, text="Patients assigned to you for care",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality - FIXED SEARCH
         def perform_search(search_term):
             visits = self.db.get_visits_for_doctor(self.user["id"])
             if search_term.strip():
@@ -3040,7 +3068,7 @@ class PharmacistMain(MainBaseFrame):
         ttk.Label(header_frame, text="Manage patient medication orders",
                  style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
 
-        # Search functionality - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality - FIXED SEARCH
         def perform_search(search_term):
             if not search_term.strip():
                 visits = self.db.get_visits_for_pharmacy()
@@ -3141,7 +3169,7 @@ class PharmacistMain(MainBaseFrame):
                      style="Subtitle.TLabel").pack(expand=True)
             return
 
-        # Search functionality for completed orders - MODIFIED TO SEARCH BY ID AND NAME
+        # Search functionality for completed orders - FIXED SEARCH
         def perform_search(search_term):
             filtered_visits = [v for v in completed_visits if
                              search_term.lower() in v["patient_name"].lower() or
